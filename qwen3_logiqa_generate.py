@@ -45,7 +45,7 @@ Let's think step by step:""").strip()
         # {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content}
     ]
-    return messages, target
+    return messages, target, input
 
 
 def generate_with_qwen3():
@@ -73,9 +73,9 @@ def generate_with_qwen3():
             for useful in [True, False]:
                 # 1. 获取格式化后的消息列表和正确答案
                 if useful:
-                    messages, correct_label = get_prompt(item, useful=useful)
+                    messages, correct_label, input_text = get_prompt(item, useful=useful)
                 else:
-                    messages, harmful_label = get_prompt(item, useful=useful)
+                    messages, harmful_label, input_text = get_prompt(item, useful=useful)
 
                 # 2. 应用 Chat Template
                 # 这会将 messages 列表转换为模型原生的字符串格式 (例如包含 <|im_start|> 等 tag)
@@ -116,6 +116,7 @@ def generate_with_qwen3():
                 "id": i,
                 "target": correct_label,
                 "harmful_target": harmful_label,
+                "question": input_text,
                 "ufl": decoded_outputs[0],  # 对应 useful=True
                 "hfl": decoded_outputs[1]  # 对应 useful=False
             }
