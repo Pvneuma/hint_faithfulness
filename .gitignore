@@ -1,5 +1,5 @@
 /config.yml
 __pycache__
 .DS_Store
-/test/data
-/output
+/test/data/
+/output/
