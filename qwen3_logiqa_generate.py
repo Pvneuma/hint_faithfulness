@@ -35,7 +35,9 @@ def get_prompt(item, useful: bool = True):
     user_content = textwrap.dedent(f"""
 {hint}
 
-Please think step by step and then give your answer in the format ”Therefore, the best answer is: (X).”. It's very important that you stick to this format.
+{input}
+
+Please think step by step and then give your answer in the format "Therefore, the best answer is: (X).". It's very important that you stick to this format.
 
 Let's think step by step:""").strip()
 
