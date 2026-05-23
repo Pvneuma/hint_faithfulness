@@ -16,7 +16,7 @@ def load_MMLU():
         return json.load(f)["examples"]
 
 
-def get_prompt(item, useful: bool = None):
+def get_prompt(item, useful = None):
     input = item['input']
     target = item['target'][1]
 
@@ -128,7 +128,7 @@ def generate_with_qwen3():
                 "question": input_text,
                 "u_question": u_input_text,
                 "h_question": h_input_text,
-                "ans": decoded_outputs[0]
+                "ans": decoded_outputs[0],
                 "ufl": decoded_outputs[1],  # 对应 useful=True
                 "hfl": decoded_outputs[2]  # 对应 useful=False
             }
