@@ -21,6 +21,7 @@ pip install transformer-lens datasets
 
 from __future__ import annotations
 
+import os
 import json
 from pathlib import Path
 from typing import Any, Dict, List
@@ -31,14 +32,16 @@ from transformer_lens import HookedTransformer
 
 
 # ------------------ CONFIG ------------------
-DATA_PATH = "data/sample.jsonl"          # jsonl file path
-TEXT_FIELD = "input"                     # column containing prompt text
-MODEL_ID = "Qwen/Qwen3-8B"               # HF model id or local path
-OUTPUT_PATH = "output/qwen3_tlens_logitlens.jsonl"
-MAX_SAMPLES = None                        # int or None
+DATA_PATH = "output/qwen3_logic_five_extracted_results.jsonl"          # jsonl file path
+TEXT_FIELD = "u_question"                     # column containing prompt text
+MODEL_ID = "Qwen/Qwen3-8b"               # HF model id or local path
+OUTPUT_PATH = "output/qwen3_useful_logitlens.jsonl"
+MAX_SAMPLES = None                      # int or None
 TOP_K = 5                                 # top-k tokens per layer
 DEVICE = None                             # None -> auto; or "cuda", "cuda:0", "mps", "cpu"
-MAX_NEW_TOKENS = 32                       # >0: greedy-generate this many tokens; only these tokens are logged
+MAX_NEW_TOKENS = 4096                       # >0: greedy-generate this many tokens; only these tokens are logged
+# To reduce multiprocessing semaphore warnings from tokenizers
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 # -------------------------------------------
 
 
@@ -79,21 +82,37 @@ def layer_topk_all_positions(
 
     prompt_tokens = model.to_tokens(prompt, prepend_bos=True)  # (1, prompt_len)
 
-    generated = model.generate(
-        prompt_tokens,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        return_type="tokens",
-    )
+    with torch.no_grad():
+        generated = model.generate(
+            prompt_tokens,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            return_type="tokens",
+        )
 
     # Separate prompt and generated spans
     prompt_len = prompt_tokens.shape[1]
+    # Free prompt tokens tensor if on GPU to save memory
+    del prompt_tokens
     gen_tokens = generated[:, prompt_len:]  # (1, max_new_tokens)
     all_tokens = generated  # full for caching
 
-    _, cache = model.run_with_cache(all_tokens, remove_batch_dim=False, return_type=None)
+    # Cache only resid_post to save memory
+    names_filter = lambda name: "resid_post" in name
+    with torch.no_grad():
+        _, cache = model.run_with_cache(
+            all_tokens,
+            remove_batch_dim=False,
+            return_type=None,
+            names_filter=names_filter,
+        )
 
-    token_strings = model.to_string(gen_tokens[0])
+    # We no longer need all_tokens
+    del all_tokens
+
+    token_strings = [
+        model.tokenizer.decode([int(t)], skip_special_tokens=False) for t in gen_tokens[0].tolist()
+    ]
     gen_len = gen_tokens.shape[1]
 
     positions: List[Dict[str, Any]] = []
@@ -101,23 +120,31 @@ def layer_topk_all_positions(
         absolute_idx = prompt_len + pos_idx
         per_layer: List[Dict[str, Any]] = []
         for layer in range(model.cfg.n_layers):
-            resid_vec = cache["resid_post", layer][0, absolute_idx, :]
+            resid_vec = cache["resid_post", layer][0, absolute_idx, :].detach()
             if hasattr(model, "ln_final") and model.ln_final is not None:
                 resid_vec = model.ln_final(resid_vec)
 
             logits = model.unembed(resid_vec)
             values, idx = torch.topk(logits, k=top_k, dim=-1)
-            tokens_str = model.to_string(idx)
+            del logits
+            tokens_str = [
+                model.tokenizer.decode([int(t)], skip_special_tokens=False) for t in idx.tolist()
+            ]
             per_layer.append(
                 {
                     "layer": layer,
                     "top": [
-                        {"token": tok, "logit": val.item()} for tok, val in zip(tokens_str, values.tolist())
+                        {"token": tok, "logit": float(val)} for tok, val in zip(tokens_str, values.tolist())
                     ],
                 }
             )
+            del values, idx
 
         positions.append({"idx": pos_idx, "token": token_strings[pos_idx], "layers": per_layer})
+
+    # Help GC release cache tensors early
+    cache = None
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     return positions
 
@@ -127,7 +154,7 @@ def main():
 
     model = load_model(MODEL_ID, device)
 
-    dataset = load_dataset("json", data_files=str(DATA_PATH))["train"]
+    dataset = load_dataset("json", data_files=str(DATA_PATH), streaming=False)["train"]
     if MAX_SAMPLES is not None:
         dataset = dataset.select(range(min(len(dataset), MAX_SAMPLES)))
 
@@ -146,8 +173,10 @@ def main():
                 model, text, TOP_K, max_new_tokens=MAX_NEW_TOKENS
             )
 
+            input_id = row.get("id", idx)
+
             rec = {
-                "id": idx,
+                "id": input_id,
                 "text": text,
                 "model_id": MODEL_ID,
                 "top_k": TOP_K,
