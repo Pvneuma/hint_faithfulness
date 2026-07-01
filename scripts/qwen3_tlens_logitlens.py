@@ -1,0 +1,162 @@
+"""Logit-lens with TransformerLens on Qwen3-8B.
+
+Features
+--------
+- Loads any HF causal LM that TransformerLens can wrap (tested with Qwen/Qwen2-7B-Instruct; Qwen3-8B should work once weights are accessible).
+- Reads a jsonl dataset (specify text field) and, for each sample, records per-layer top-K next-token predictions using the model's unembedding matrix.
+- Captures logit-lens outputs for **generated tokens only** (prompt logits are omitted), grouping by token (outer) then layer (inner).
+- Greedy decoding (`do_sample=False`) is used when generating tokens for analysis.
+- Outputs jsonl where each line stores the prompt and per-layer top tokens + logits.
+
+Usage
+-----
+Edit the CONFIG block below, then run:
+
+    python scripts/qwen3_tlens_logitlens.py
+
+Dependencies
+------------
+pip install transformer-lens datasets
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, List
+
+import torch
+from datasets import load_dataset
+from transformer_lens import HookedTransformer
+
+
+# ------------------ CONFIG ------------------
+DATA_PATH = "data/sample.jsonl"          # jsonl file path
+TEXT_FIELD = "input"                     # column containing prompt text
+MODEL_ID = "Qwen/Qwen3-8B"               # HF model id or local path
+OUTPUT_PATH = "output/qwen3_tlens_logitlens.jsonl"
+MAX_SAMPLES = None                        # int or None
+TOP_K = 5                                 # top-k tokens per layer
+DEVICE = None                             # None -> auto; or "cuda", "cuda:0", "mps", "cpu"
+MAX_NEW_TOKENS = 32                       # >0: greedy-generate this many tokens; only these tokens are logged
+# -------------------------------------------
+
+
+def infer_device(user_choice: str | None) -> str:
+    if user_choice:
+        return user_choice
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def load_model(model_id: str, device: str) -> HookedTransformer:
+    print(f"Loading {model_id} via TransformerLens on {device}")
+    model = HookedTransformer.from_pretrained(
+        model_id,
+        device=device,
+        fold_ln=False,  # keep original layer norms
+        center_writing_weights=False,
+        center_unembed=False,
+        trust_remote_code=True,
+    )
+    model.eval()
+    return model
+
+
+def layer_topk_all_positions(
+    model: HookedTransformer,
+    prompt: str,
+    top_k: int,
+    max_new_tokens: int = 0,
+) -> List[Dict[str, Any]]:
+    """Return per-generated-token top-k logits, with per-layer detail nested inside each token.
+
+    Only generated tokens are included (prompt positions are skipped).
+    """
+
+    prompt_tokens = model.to_tokens(prompt, prepend_bos=True)  # (1, prompt_len)
+
+    generated = model.generate(
+        prompt_tokens,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        return_type="tokens",
+    )
+
+    # Separate prompt and generated spans
+    prompt_len = prompt_tokens.shape[1]
+    gen_tokens = generated[:, prompt_len:]  # (1, max_new_tokens)
+    all_tokens = generated  # full for caching
+
+    _, cache = model.run_with_cache(all_tokens, remove_batch_dim=False, return_type=None)
+
+    token_strings = model.to_string(gen_tokens[0])
+    gen_len = gen_tokens.shape[1]
+
+    positions: List[Dict[str, Any]] = []
+    for pos_idx in range(gen_len):
+        absolute_idx = prompt_len + pos_idx
+        per_layer: List[Dict[str, Any]] = []
+        for layer in range(model.cfg.n_layers):
+            resid_vec = cache["resid_post", layer][0, absolute_idx, :]
+            if hasattr(model, "ln_final") and model.ln_final is not None:
+                resid_vec = model.ln_final(resid_vec)
+
+            logits = model.unembed(resid_vec)
+            values, idx = torch.topk(logits, k=top_k, dim=-1)
+            tokens_str = model.to_string(idx)
+            per_layer.append(
+                {
+                    "layer": layer,
+                    "top": [
+                        {"token": tok, "logit": val.item()} for tok, val in zip(tokens_str, values.tolist())
+                    ],
+                }
+            )
+
+        positions.append({"idx": pos_idx, "token": token_strings[pos_idx], "layers": per_layer})
+
+    return positions
+
+
+def main():
+    device = infer_device(DEVICE)
+
+    model = load_model(MODEL_ID, device)
+
+    dataset = load_dataset("json", data_files=str(DATA_PATH))["train"]
+    if MAX_SAMPLES is not None:
+        dataset = dataset.select(range(min(len(dataset), MAX_SAMPLES)))
+
+    out_path = Path(OUTPUT_PATH)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with out_path.open("w", encoding="utf-8") as f:
+        for idx, row in enumerate(dataset):
+            text = row.get(TEXT_FIELD)
+            if text is None:
+                raise KeyError(
+                    f"Row {idx} missing text field '{TEXT_FIELD}'. Available keys: {list(row.keys())}"
+                )
+
+            positions = layer_topk_all_positions(
+                model, text, TOP_K, max_new_tokens=MAX_NEW_TOKENS
+            )
+
+            rec = {
+                "id": idx,
+                "text": text,
+                "model_id": MODEL_ID,
+                "top_k": TOP_K,
+                "positions": positions,
+            }
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    print(f"Saved logit-lens results to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
