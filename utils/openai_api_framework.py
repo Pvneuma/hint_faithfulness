@@ -78,7 +78,7 @@ class OpenAIHandler:
             )
 
             # 持久化 batch_id 到本地文件
-            with open(self.batch_id_record_path, "w", encoding="utf-8") as f:
+            with open(self.batch_id_record_path, "a", encoding="utf-8") as f:
                 f.write(f"{batch_response.id}\n")
 
             return batch_response.id
