@@ -28,7 +28,7 @@ from typing import Any, Dict, List
 
 import torch
 from datasets import load_dataset
-from transformer_lens import HookedTransformer
+from transformer_lens import HookedTransformer, utils
 
 
 # ------------------ CONFIG ------------------
@@ -98,7 +98,7 @@ def layer_topk_all_positions(
     all_tokens = generated  # full for caching
 
     # Cache only attention outputs and resid_post to save memory
-    names_filter = lambda name: ("resid_post" in name) or ("attn.hook_result" in name)
+    names_filter = lambda name: ("resid_post" in name) or ("attn.hook_result" in name) or ("hook_attn.hook_result" in name)
     with torch.no_grad():
         _, cache = model.run_with_cache(
             all_tokens,
@@ -121,7 +121,10 @@ def layer_topk_all_positions(
         per_layer: List[Dict[str, Any]] = []
         for layer in range(model.cfg.n_layers):
             # Attention output (no final LN)
-            attn_vec = cache["attn.hook_result", layer][0, absolute_idx, :].detach()
+            attn_key = utils.get_act_name("attn.hook_result", layer, model.cfg)
+            if attn_key not in cache:  # some models use hook_attn prefix
+                attn_key = utils.get_act_name("hook_attn.hook_result", layer, model.cfg)
+            attn_vec = cache[attn_key][0, absolute_idx, :].detach()
             attn_logits = model.unembed(attn_vec)
             attn_values, attn_idx = torch.topk(attn_logits, k=top_k, dim=-1)
             del attn_logits
@@ -130,7 +133,8 @@ def layer_topk_all_positions(
             ]
 
             # Residual post (with final LN if present)
-            resid_vec = cache["resid_post", layer][0, absolute_idx, :].detach()
+            resid_key = utils.get_act_name("resid_post", layer, model.cfg)
+            resid_vec = cache[resid_key][0, absolute_idx, :].detach()
             if hasattr(model, "ln_final") and model.ln_final is not None:
                 resid_vec = model.ln_final(resid_vec)
             resid_logits = model.unembed(resid_vec)
