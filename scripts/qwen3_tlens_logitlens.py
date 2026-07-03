@@ -28,7 +28,7 @@ from typing import Any, Dict, List
 
 import torch
 from datasets import load_dataset
-from transformer_lens import HookedTransformer, utils
+from transformer_lens import HookedTransformer
 
 
 # ------------------ CONFIG ------------------
@@ -120,10 +120,15 @@ def layer_topk_all_positions(
         absolute_idx = prompt_len + pos_idx
         per_layer: List[Dict[str, Any]] = []
         for layer in range(model.cfg.n_layers):
-            # Attention output (no final LN)
-            attn_key = utils.get_act_name("attn.hook_result", layer, model.cfg)
-            if attn_key not in cache:  # some models use hook_attn prefix
-                attn_key = utils.get_act_name("hook_attn.hook_result", layer, model.cfg)
+            # Determine attention and resid keys robustly
+            attn_key_options = [
+                f"blocks.{layer}.attn.hook_result",
+                f"blocks.{layer}.hook_attn.hook_result",
+                f"blocks.{layer}.attn_out",
+            ]
+            attn_key = next((k for k in attn_key_options if k in cache), None)
+            if attn_key is None:
+                raise KeyError(f"Attention hook not found for layer {layer}; tried {attn_key_options}")
             attn_vec = cache[attn_key][0, absolute_idx, :].detach()
             attn_logits = model.unembed(attn_vec)
             attn_values, attn_idx = torch.topk(attn_logits, k=top_k, dim=-1)
@@ -133,7 +138,13 @@ def layer_topk_all_positions(
             ]
 
             # Residual post (with final LN if present)
-            resid_key = utils.get_act_name("resid_post", layer, model.cfg)
+            resid_key_options = [
+                f"blocks.{layer}.hook_resid_post",
+                f"blocks.{layer}.resid_post",
+            ]
+            resid_key = next((k for k in resid_key_options if k in cache), None)
+            if resid_key is None:
+                raise KeyError(f"Resid post hook not found for layer {layer}; tried {resid_key_options}")
             resid_vec = cache[resid_key][0, absolute_idx, :].detach()
             if hasattr(model, "ln_final") and model.ln_final is not None:
                 resid_vec = model.ln_final(resid_vec)
