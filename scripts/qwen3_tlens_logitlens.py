@@ -97,6 +97,7 @@ def layer_topk_all_positions(
     del prompt_tokens
     gen_tokens = generated[:, prompt_len:]  # (1, max_new_tokens)
     all_tokens = generated  # full for caching
+    tokens_list = generated.cpu().tolist()
 
     # Cache hook_resid_mid and resid_post to save memory
     names_filter = lambda name: ("resid_post" in name) or ("hook_resid_mid" in name)
@@ -108,7 +109,7 @@ def layer_topk_all_positions(
             names_filter=names_filter,
         )
 
-    # We no longer need all_tokens
+    # We no longer need all_tokens tensor
     del all_tokens
 
     token_strings = [
@@ -191,7 +192,7 @@ def layer_topk_all_positions(
     cache = None
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-    return positions, all_tokens.tolist()
+    return positions, tokens_list
 
 
 def main():
