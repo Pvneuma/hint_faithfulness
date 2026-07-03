@@ -97,8 +97,8 @@ def layer_topk_all_positions(
     gen_tokens = generated[:, prompt_len:]  # (1, max_new_tokens)
     all_tokens = generated  # full for caching
 
-    # Cache only resid_post to save memory
-    names_filter = lambda name: "resid_post" in name
+    # Cache only attention outputs and resid_post to save memory
+    names_filter = lambda name: ("resid_post" in name) or ("attn.hook_result" in name)
     with torch.no_grad():
         _, cache = model.run_with_cache(
             all_tokens,
@@ -120,25 +120,39 @@ def layer_topk_all_positions(
         absolute_idx = prompt_len + pos_idx
         per_layer: List[Dict[str, Any]] = []
         for layer in range(model.cfg.n_layers):
+            # Attention output (no final LN)
+            attn_vec = cache["attn.hook_result", layer][0, absolute_idx, :].detach()
+            attn_logits = model.unembed(attn_vec)
+            attn_values, attn_idx = torch.topk(attn_logits, k=top_k, dim=-1)
+            del attn_logits
+            attn_tokens = [
+                model.tokenizer.decode([int(t)], skip_special_tokens=False) for t in attn_idx.tolist()
+            ]
+
+            # Residual post (with final LN if present)
             resid_vec = cache["resid_post", layer][0, absolute_idx, :].detach()
             if hasattr(model, "ln_final") and model.ln_final is not None:
                 resid_vec = model.ln_final(resid_vec)
-
-            logits = model.unembed(resid_vec)
-            values, idx = torch.topk(logits, k=top_k, dim=-1)
-            del logits
-            tokens_str = [
-                model.tokenizer.decode([int(t)], skip_special_tokens=False) for t in idx.tolist()
+            resid_logits = model.unembed(resid_vec)
+            resid_values, resid_idx = torch.topk(resid_logits, k=top_k, dim=-1)
+            del resid_logits
+            resid_tokens = [
+                model.tokenizer.decode([int(t)], skip_special_tokens=False) for t in resid_idx.tolist()
             ]
+
             per_layer.append(
                 {
                     "layer": layer,
-                    "top": [
-                        {"token": tok, "logit": float(val)} for tok, val in zip(tokens_str, values.tolist())
+                    "attn_top": [
+                        {"token": tok, "logit": float(val)} for tok, val in zip(attn_tokens, attn_values.tolist())
+                    ],
+                    "resid_post_top": [
+                        {"token": tok, "logit": float(val)}
+                        for tok, val in zip(resid_tokens, resid_values.tolist())
                     ],
                 }
             )
-            del values, idx
+            del attn_values, attn_idx, resid_values, resid_idx
 
         positions.append({"idx": pos_idx, "token": token_strings[pos_idx], "layers": per_layer})
 
@@ -162,7 +176,10 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with out_path.open("w", encoding="utf-8") as f:
+        total = len(dataset)
         for idx, row in enumerate(dataset):
+            if idx % 10 == 0:
+                print(f"Processing sample {idx}/{total}")
             text = row.get(TEXT_FIELD)
             if text is None:
                 raise KeyError(
