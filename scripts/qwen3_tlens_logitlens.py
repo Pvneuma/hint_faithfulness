@@ -36,7 +36,8 @@ DATA_PATH = "output/qwen3_logic_five_extracted_results.jsonl"          # jsonl f
 TEXT_FIELD = "u_question"                     # column containing prompt text
 MODEL_ID = "Qwen/Qwen3-8b"               # HF model id or local path
 OUTPUT_PATH = "output/qwen3_useful_logitlens.jsonl"
-MAX_SAMPLES = 1                     # int or None
+TOKENS_DUMP_PATH = "output/qwen3_useful_all_tokens.jsonl"
+MAX_SAMPLES = None                     # int or None
 TOP_K = 5                                 # top-k tokens per layer
 DEVICE = None                             # None -> auto; or "cuda", "cuda:0", "mps", "cpu"
 MAX_NEW_TOKENS = 4096                       # >0: greedy-generate this many tokens; only these tokens are logged
@@ -190,7 +191,7 @@ def layer_topk_all_positions(
     cache = None
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-    return positions
+    return positions, all_tokens.tolist()
 
 
 def main():
@@ -205,7 +206,7 @@ def main():
     out_path = Path(OUTPUT_PATH)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with out_path.open("w", encoding="utf-8") as f:
+    with out_path.open("w", encoding="utf-8") as f, tokens_dump_path.open("w", encoding="utf-8") as tf:
         total = len(dataset)
         for idx, row in enumerate(dataset):
             if idx % 10 == 0:
@@ -216,7 +217,7 @@ def main():
                     f"Row {idx} missing text field '{TEXT_FIELD}'. Available keys: {list(row.keys())}"
                 )
 
-            positions = layer_topk_all_positions(
+            positions, all_tokens = layer_topk_all_positions(
                 model, text, TOP_K, max_new_tokens=MAX_NEW_TOKENS
             )
 
@@ -230,6 +231,9 @@ def main():
                 "positions": positions,
             }
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+            # dump tokens for reuse
+            tf.write(json.dumps({"id": input_id, "all_tokens": all_tokens}, ensure_ascii=False) + "\n")
 
     print(f"Saved logit-lens results to {out_path}")
 
