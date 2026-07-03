@@ -81,7 +81,13 @@ def layer_topk_all_positions(
     Only generated tokens are included (prompt positions are skipped).
     """
 
-    prompt_tokens = model.to_tokens(prompt, prepend_bos=True)  # (1, prompt_len)
+    # Apply chat template to ensure assistant prefix (<think>, etc.) is present
+    chat_text = model.tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    prompt_tokens = model.to_tokens(chat_text, prepend_bos=True)  # (1, prompt_len)
 
     with torch.no_grad():
         generated = model.generate(
