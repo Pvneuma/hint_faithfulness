@@ -139,9 +139,17 @@ def layer_topk_all_positions(
         if hasattr(model, "ln_final") and model.ln_final is not None:
             attn_mat = model.ln_final(attn_mat)
 
-        # Batched logits
-        attn_logits = attn_mat @ unembed_w.T
-        resid_logits = resid_mat @ unembed_w.T
+        # Batched logits; handle weight orientation (vocab x d_model) vs (d_model x vocab)
+        if unembed_w.shape[0] == attn_mat.shape[1]:
+            attn_logits = attn_mat @ unembed_w
+            resid_logits = resid_mat @ unembed_w
+        elif unembed_w.shape[1] == attn_mat.shape[1]:
+            attn_logits = attn_mat @ unembed_w.T
+            resid_logits = resid_mat @ unembed_w.T
+        else:
+            raise ValueError(
+                f"Unexpected unembed weight shape {unembed_w.shape} for hidden size {attn_mat.shape[1]}"
+            )
 
         attn_values, attn_idx = torch.topk(attn_logits, k=top_k, dim=-1)
         resid_values, resid_idx = torch.topk(resid_logits, k=top_k, dim=-1)
