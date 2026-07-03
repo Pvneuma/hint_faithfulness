@@ -97,11 +97,8 @@ def layer_topk_all_positions(
     gen_tokens = generated[:, prompt_len:]  # (1, max_new_tokens)
     all_tokens = generated  # full for caching
 
-    # Cache attention outputs (result/z/out) and resid_post to save memory
-    names_filter = lambda name: (
-        ("resid_post" in name)
-        or ("attn" in name and ("hook_result" in name or "hook_z" in name or "attn_out" in name))
-    )
+    # Cache attn.hook_result and resid_post to save memory
+    names_filter = lambda name: ("resid_post" in name) or ("attn.hook_result" in name)
     with torch.no_grad():
         _, cache = model.run_with_cache(
             all_tokens,
@@ -123,10 +120,10 @@ def layer_topk_all_positions(
         absolute_idx = prompt_len + pos_idx
         per_layer: List[Dict[str, Any]] = []
         for layer in range(model.cfg.n_layers):
-            # Use fixed attention hook name (pre-LN Qwen): blocks.{layer}.attn.hook_result
             attn_key = f"blocks.{layer}.attn.hook_result"
             if attn_key not in cache:
-                raise KeyError(f"Attention hook not found: {attn_key}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
+                raise KeyError(
+                    f"Attention hook not found: {attn_key}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
             attn_vec = cache[attn_key][0, absolute_idx, :].detach()
             attn_logits = model.unembed(attn_vec)
             attn_values, attn_idx = torch.topk(attn_logits, k=top_k, dim=-1)
