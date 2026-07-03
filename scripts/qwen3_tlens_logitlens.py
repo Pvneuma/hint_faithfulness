@@ -97,8 +97,11 @@ def layer_topk_all_positions(
     gen_tokens = generated[:, prompt_len:]  # (1, max_new_tokens)
     all_tokens = generated  # full for caching
 
-    # Cache only attention outputs and resid_post to save memory
-    names_filter = lambda name: ("resid_post" in name) or ("attn.hook_result" in name) or ("hook_attn.hook_result" in name)
+    # Cache attention outputs (result/z/out) and resid_post to save memory
+    names_filter = lambda name: (
+        ("resid_post" in name)
+        or ("attn" in name and ("hook_result" in name or "hook_z" in name or "attn_out" in name))
+    )
     with torch.no_grad():
         _, cache = model.run_with_cache(
             all_tokens,
@@ -121,7 +124,13 @@ def layer_topk_all_positions(
         per_layer: List[Dict[str, Any]] = []
         for layer in range(model.cfg.n_layers):
             # Determine attention and resid keys robustly
-            attn_candidates = [k for k in cache.keys() if k.startswith(f"blocks.{layer}.") and "attn" in k and "result" in k]
+            attn_candidates = [
+                k
+                for k in cache.keys()
+                if k.startswith(f"blocks.{layer}.")
+                and "attn" in k
+                and ("result" in k or "attn_out" in k or "hook_z" in k)
+            ]
             attn_key = attn_candidates[0] if attn_candidates else None
             if attn_key is None:
                 raise KeyError(f"Attention hook not found for layer {layer}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
