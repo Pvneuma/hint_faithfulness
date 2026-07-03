@@ -97,8 +97,8 @@ def layer_topk_all_positions(
     gen_tokens = generated[:, prompt_len:]  # (1, max_new_tokens)
     all_tokens = generated  # full for caching
 
-    # Cache attn.hook_result and resid_post to save memory
-    names_filter = lambda name: ("resid_post" in name) or ("attn.hook_result" in name)
+    # Cache hook_attn_out and resid_post to save memory
+    names_filter = lambda name: ("resid_post" in name) or ("hook_attn_out" in name)
     with torch.no_grad():
         _, cache = model.run_with_cache(
             all_tokens,
@@ -120,7 +120,7 @@ def layer_topk_all_positions(
         absolute_idx = prompt_len + pos_idx
         per_layer: List[Dict[str, Any]] = []
         for layer in range(model.cfg.n_layers):
-            attn_key = f"blocks.{layer}.attn.hook_result"
+            attn_key = f"blocks.{layer}.hook_attn_out"
             if attn_key not in cache:
                 raise KeyError(
                     f"Attention hook not found: {attn_key}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
