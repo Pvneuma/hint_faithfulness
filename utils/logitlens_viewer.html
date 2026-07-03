@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Logit Lens Viewer</title>
+  <style>
+    :root { --bg:#f8fafc; --panel:#ffffff; --border:#e2e8f0; --text:#0f172a; --muted:#64748b; --accent:#2563eb; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: "Inter", system-ui, -apple-system, sans-serif; background:var(--bg); color:var(--text); display:grid; grid-template-columns:300px 1fr; grid-template-rows:auto 1fr; height:100vh; }
+    header { grid-column:1 / -1; padding:10px 14px; background:#0f172a; color:#e2e8f0; display:flex; gap:12px; align-items:center; }
+    main { display:grid; grid-template-columns:300px 1fr; overflow:hidden; }
+    #sidebar { padding:12px; background:var(--panel); border-right:1px solid var(--border); overflow:auto; }
+    #content { padding:12px; overflow:hidden; display:flex; flex-direction:column; gap:10px; }
+    input[type="file"], input[type="text"], select { font-size:14px; }
+    .muted { color:var(--muted); }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#e0f2fe; color:#075985; font-size:12px; }
+    .list { border:1px solid var(--border); border-radius:8px; max-height:calc(100vh - 220px); overflow:auto; background:#fff; }
+    .item { padding:6px 8px; border-bottom:1px solid var(--border); cursor:pointer; }
+    .item:hover { background:#f8fafc; }
+    .item.active { background:#dbeafe; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { border:1px solid var(--border); padding:6px 8px; text-align:left; vertical-align:top; }
+    th { background:#f1f5f9; position:sticky; top:0; z-index:1; }
+    .topk { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; white-space:nowrap; }
+    .token-cell { max-width:200px; overflow:hidden; text-overflow:ellipsis; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>Logit Lens Viewer</strong></div>
+    <input type="file" id="file" accept=".jsonl,.txt" />
+    <span id="status" class="muted">Load a JSONL from qwen3_tlens_logitlens.py</span>
+  </header>
+
+  <div id="sidebar">
+    <div style="margin-bottom:8px;">
+      <label class="muted">Filter by id</label><br>
+      <input id="filter" type="text" placeholder="e.g. 123" style="width:100%;" />
+    </div>
+    <div id="summary" class="muted" style="margin-bottom:8px;">No data loaded.</div>
+    <div class="list" id="samples"></div>
+  </div>
+
+  <div id="content">
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+      <div>Sample: <span id="current-id" class="pill">—</span></div>
+      <div>Layer: <select id="layer"></select></div>
+      <div>Positions: <span id="pos-count" class="muted">0</span></div>
+      <div>Top-k: <span id="topk" class="muted">0</span></div>
+    </div>
+    <div style="flex:1; overflow:auto;">
+      <table id="table">
+        <thead>
+          <tr>
+            <th style="width:70px;">pos idx</th>
+            <th style="width:200px;">token</th>
+            <th>resid_mid_top</th>
+            <th>resid_post_top</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('file');
+    const samplesDiv = document.getElementById('samples');
+    const statusSpan = document.getElementById('status');
+    const filterInput = document.getElementById('filter');
+    const summaryDiv = document.getElementById('summary');
+    const layerSelect = document.getElementById('layer');
+    const currentId = document.getElementById('current-id');
+    const posCount = document.getElementById('pos-count');
+    const topkSpan = document.getElementById('topk');
+    const tableBody = document.querySelector('#table tbody');
+
+    let data = [];
+    let filtered = [];
+    let currentSample = null;
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      statusSpan.textContent = `Loading ${file.name} ...`;
+      data = await readJsonl(file);
+      filtered = data;
+      summaryDiv.textContent = `Loaded ${data.length} samples.`;
+      statusSpan.textContent = 'Loaded. Click a sample to inspect.';
+      renderSampleList();
+      if (data.length) selectSample(data[0]);
+    });
+
+    filterInput.addEventListener('input', () => {
+      const q = filterInput.value.trim().toLowerCase();
+      filtered = data.filter(d => String(d.id).toLowerCase().includes(q));
+      renderSampleList();
+    });
+
+    layerSelect.addEventListener('change', () => currentSample && renderTable());
+
+    function renderSampleList() {
+      samplesDiv.innerHTML = '';
+      filtered.forEach(sample => {
+        const div = document.createElement('div');
+        div.className = 'item' + (currentSample && currentSample.id === sample.id ? ' active' : '');
+        const len = sample.positions ? sample.positions.length : 0;
+        div.textContent = `${sample.id} · ${len} tokens`;
+        div.onclick = () => selectSample(sample);
+        samplesDiv.appendChild(div);
+      });
+    }
+
+    function selectSample(sample) {
+      currentSample = sample;
+      currentId.textContent = sample.id;
+      posCount.textContent = sample.positions ? sample.positions.length : 0;
+      const tk = sample.top_k || (sample.positions?.[0]?.layers?.[0]?.attn_top?.length ?? 0);
+      topkSpan.textContent = tk;
+      const layers = sample.positions?.[0]?.layers?.length || 0;
+      layerSelect.innerHTML = '';
+      for (let i = 0; i < layers; i++) {
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = i;
+        layerSelect.appendChild(opt);
+      }
+      renderSampleList();
+      renderTable();
+    }
+
+    function renderTable() {
+      tableBody.innerHTML = '';
+      if (!currentSample || !currentSample.positions) return;
+      const layerIdx = parseInt(layerSelect.value || '0');
+      currentSample.positions.forEach(pos => {
+        const tr = document.createElement('tr');
+        const tdIdx = document.createElement('td'); tdIdx.textContent = pos.idx; tr.appendChild(tdIdx);
+        const tdTok = document.createElement('td'); tdTok.textContent = pos.token; tdTok.className='token-cell'; tr.appendChild(tdTok);
+
+        const attn = pos.layers?.[layerIdx]?.attn_top || [];
+        const resid = pos.layers?.[layerIdx]?.resid_post_top || [];
+        const tdA = document.createElement('td'); tdA.innerHTML = renderTop(attn); tr.appendChild(tdA);
+        const tdR = document.createElement('td'); tdR.innerHTML = renderTop(resid); tr.appendChild(tdR);
+        tableBody.appendChild(tr);
+      });
+    }
+
+    function renderTop(arr) {
+      return arr.map(x => `<span class="topk">${escapeHtml(x.token)}<span class="muted"> (${num(x.logit)})</span></span>`).join(' ');
+    }
+
+    function num(v) { return typeof v === 'number' ? v.toFixed(3) : v; }
+    function escapeHtml(str) { return String(str).replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s])); }
+
+    function readJsonl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const lines = reader.result.split(/\r?\n/).filter(Boolean);
+          resolve(lines.map((l,i) => { try {return JSON.parse(l);} catch(e){ console.warn('Parse error line', i, e); return null; }}).filter(Boolean));
+        };
+        reader.onerror = reject;
+        reader.readAsText(file);
+      });
+    }
+  </script>
+</body>
+</html>

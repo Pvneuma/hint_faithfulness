@@ -97,8 +97,8 @@ def layer_topk_all_positions(
     gen_tokens = generated[:, prompt_len:]  # (1, max_new_tokens)
     all_tokens = generated  # full for caching
 
-    # Cache hook_attn_out and resid_post to save memory
-    names_filter = lambda name: ("resid_post" in name) or ("hook_attn_out" in name)
+    # Cache hook_resid_mid and resid_post to save memory
+    names_filter = lambda name: ("resid_post" in name) or ("hook_resid_mid" in name)
     with torch.no_grad():
         _, cache = model.run_with_cache(
             all_tokens,
@@ -116,51 +116,67 @@ def layer_topk_all_positions(
     gen_len = gen_tokens.shape[1]
 
     positions: List[Dict[str, Any]] = []
-    for pos_idx in range(gen_len):
-        absolute_idx = prompt_len + pos_idx
-        per_layer: List[Dict[str, Any]] = []
-        for layer in range(model.cfg.n_layers):
-            attn_key = f"blocks.{layer}.hook_attn_out"
-            if attn_key not in cache:
-                raise KeyError(
-                    f"Attention hook not found: {attn_key}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
-            attn_vec = cache[attn_key][0, absolute_idx, :].detach()
-            attn_logits = model.unembed(attn_vec)
-            attn_values, attn_idx = torch.topk(attn_logits, k=top_k, dim=-1)
-            del attn_logits
+    # Precompute lm_head weight for efficiency
+    unembed_w = model.unembed.W_U if hasattr(model.unembed, "W_U") else model.unembed.weight
+
+    for layer in range(model.cfg.n_layers):
+        # Resid mid matrix (gen_len, d_model)
+        attn_key = f"blocks.{layer}.hook_resid_mid"
+        if attn_key not in cache:
+            raise KeyError(
+                f"Resid mid hook not found: {attn_key}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
+        attn_mat = cache[attn_key][0, prompt_len:, :].detach()  # (gen_len, d)
+
+        # Resid post matrix (gen_len, d_model)
+        resid_key = f"blocks.{layer}.hook_resid_post"
+        if resid_key not in cache:
+            raise KeyError(f"Resid post hook not found: {resid_key}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
+        resid_mat = cache[resid_key][0, prompt_len:, :].detach()
+        if hasattr(model, "ln_final") and model.ln_final is not None:
+            resid_mat = model.ln_final(resid_mat)
+
+        # Apply final LN to resid_mid as well for fair comparison
+        if hasattr(model, "ln_final") and model.ln_final is not None:
+            attn_mat = model.ln_final(attn_mat)
+
+        # Batched logits
+        attn_logits = attn_mat @ unembed_w.T
+        resid_logits = resid_mat @ unembed_w.T
+
+        attn_values, attn_idx = torch.topk(attn_logits, k=top_k, dim=-1)
+        resid_values, resid_idx = torch.topk(resid_logits, k=top_k, dim=-1)
+
+        # Free large tensors
+        del attn_logits, resid_logits, attn_mat, resid_mat
+
+        for pos_idx in range(gen_len):
+            if len(positions) <= pos_idx:
+                positions.append({"idx": pos_idx, "token": token_strings[pos_idx], "layers": []})
+
             attn_tokens = [
-                model.tokenizer.decode([int(t)], skip_special_tokens=False) for t in attn_idx.tolist()
+                model.tokenizer.decode([int(t)], skip_special_tokens=False)
+                for t in attn_idx[pos_idx].tolist()
             ]
-
-            # Residual post (with final LN if present)
-            resid_key = f"blocks.{layer}.hook_resid_post"
-            if resid_key not in cache:
-                raise KeyError(f"Resid post hook not found: {resid_key}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
-            resid_vec = cache[resid_key][0, absolute_idx, :].detach()
-            if hasattr(model, "ln_final") and model.ln_final is not None:
-                resid_vec = model.ln_final(resid_vec)
-            resid_logits = model.unembed(resid_vec)
-            resid_values, resid_idx = torch.topk(resid_logits, k=top_k, dim=-1)
-            del resid_logits
             resid_tokens = [
-                model.tokenizer.decode([int(t)], skip_special_tokens=False) for t in resid_idx.tolist()
+                model.tokenizer.decode([int(t)], skip_special_tokens=False)
+                for t in resid_idx[pos_idx].tolist()
             ]
 
-            per_layer.append(
+            positions[pos_idx]["layers"].append(
                 {
                     "layer": layer,
                     "attn_top": [
-                        {"token": tok, "logit": float(val)} for tok, val in zip(attn_tokens, attn_values.tolist())
+                        {"token": tok, "logit": float(val)}
+                        for tok, val in zip(attn_tokens, attn_values[pos_idx].tolist())
                     ],
                     "resid_post_top": [
                         {"token": tok, "logit": float(val)}
-                        for tok, val in zip(resid_tokens, resid_values.tolist())
+                        for tok, val in zip(resid_tokens, resid_values[pos_idx].tolist())
                     ],
                 }
             )
-            del attn_values, attn_idx, resid_values, resid_idx
 
-        positions.append({"idx": pos_idx, "token": token_strings[pos_idx], "layers": per_layer})
+        del attn_values, attn_idx, resid_values, resid_idx
 
     # Help GC release cache tensors early
     cache = None
