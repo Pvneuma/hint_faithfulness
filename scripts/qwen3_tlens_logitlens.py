@@ -206,6 +206,9 @@ def main():
     out_path = Path(OUTPUT_PATH)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    tokens_dump_path = Path(TOKENS_DUMP_PATH)
+    tokens_dump_path.parent.mkdir(parents=True, exist_ok=True)
+
     with out_path.open("w", encoding="utf-8") as f, tokens_dump_path.open("w", encoding="utf-8") as tf:
         total = len(dataset)
         for idx, row in enumerate(dataset):
