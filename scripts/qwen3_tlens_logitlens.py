@@ -116,9 +116,6 @@ def layer_topk_all_positions(
     token_strings = [
         model.tokenizer.decode([int(t)], skip_special_tokens=False) for t in gen_tokens[0].tolist()
     ]
-
-    attn_keys_used = []
-    resid_keys_used = []
     gen_len = gen_tokens.shape[1]
 
     positions: List[Dict[str, Any]] = []
@@ -126,18 +123,10 @@ def layer_topk_all_positions(
         absolute_idx = prompt_len + pos_idx
         per_layer: List[Dict[str, Any]] = []
         for layer in range(model.cfg.n_layers):
-            # Determine attention and resid keys robustly
-            attn_candidates = [
-                k
-                for k in cache.keys()
-                if k.startswith(f"blocks.{layer}.")
-                and "attn" in k
-                and ("result" in k or "attn_out" in k or "hook_z" in k)
-            ]
-            attn_key = attn_candidates[0] if attn_candidates else None
-            if attn_key is None:
-                raise KeyError(f"Attention hook not found for layer {layer}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
-            attn_keys_used.append(attn_key)
+            # Use fixed attention hook name (pre-LN Qwen): blocks.{layer}.attn.hook_result
+            attn_key = f"blocks.{layer}.attn.hook_result"
+            if attn_key not in cache:
+                raise KeyError(f"Attention hook not found: {attn_key}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
             attn_vec = cache[attn_key][0, absolute_idx, :].detach()
             attn_logits = model.unembed(attn_vec)
             attn_values, attn_idx = torch.topk(attn_logits, k=top_k, dim=-1)
@@ -147,11 +136,9 @@ def layer_topk_all_positions(
             ]
 
             # Residual post (with final LN if present)
-            resid_candidates = [k for k in cache.keys() if k.startswith(f"blocks.{layer}.") and "resid_post" in k]
-            resid_key = resid_candidates[0] if resid_candidates else None
-            if resid_key is None:
-                raise KeyError(f"Resid post hook not found for layer {layer}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
-            resid_keys_used.append(resid_key)
+            resid_key = f"blocks.{layer}.hook_resid_post"
+            if resid_key not in cache:
+                raise KeyError(f"Resid post hook not found: {resid_key}; available keys: {[k for k in cache.keys() if k.startswith(f'blocks.{layer}.')]}")
             resid_vec = cache[resid_key][0, absolute_idx, :].detach()
             if hasattr(model, "ln_final") and model.ln_final is not None:
                 resid_vec = model.ln_final(resid_vec)
@@ -181,10 +168,6 @@ def layer_topk_all_positions(
     # Help GC release cache tensors early
     cache = None
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-    # Log keys used for debug/visibility
-    print("Used attention hooks:", sorted(set(attn_keys_used)))
-    print("Used resid_post hooks:", sorted(set(resid_keys_used)))
 
     return positions
 
