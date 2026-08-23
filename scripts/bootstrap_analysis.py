@@ -1,7 +1,7 @@
 """Paired bootstrap analysis for hint-related logit-lens metrics.
 
-Computes Occurrence Rate, Conditional Mean Logit, and Hint Activation Score
-for helpful vs harmful conditions, plus their differences, with 95% percentile
+Computes Occurrence Rate and Mean Rank Score
+for helpful vs harmful conditions with 95% percentile
 bootstrap CIs (paired by question id).
 
 Requirements
@@ -14,7 +14,7 @@ Requirements
 Outputs
 -------
 For each top_field (attn_top, resid_post_top), saves JSON with:
-- baseline metrics (no sampling) for Helpful, Harmful, Difference
+- baseline metrics (no sampling) for Helpful and Harmful
 - 95% percentile CI for each metric per layer
 
 """
@@ -46,8 +46,8 @@ def _normalize_token(tok: str) -> str:
 def _accumulate_record(record: dict, top_field: str, hint_set: set[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     total = np.zeros(LAYERS, dtype=np.int64)
     hits = np.zeros(LAYERS, dtype=np.int64)
-    log_sum = np.zeros(LAYERS, dtype=np.float64)
-    log_cnt = np.zeros(LAYERS, dtype=np.int64)
+    score_sum = np.zeros(LAYERS, dtype=np.float64)
+    score_cnt = np.zeros(LAYERS, dtype=np.int64)
 
     for pos in record.get("positions", []):
         for layer_entry in pos.get("layers", []):
@@ -58,17 +58,18 @@ def _accumulate_record(record: dict, top_field: str, hint_set: set[str]) -> Tupl
             total[layer] += 1
 
             found = False
-            for item in layer_entry.get(top_field, []):
+            for rank, item in enumerate(layer_entry.get(top_field, [])):
                 token = _normalize_token(str(item.get("token", "")))
                 if token in hint_set:
                     found = True
-                    log_sum[layer] += float(item.get("logit", 0.0))
-                    log_cnt[layer] += 1
+                    score = 1.0 / (rank + 1)
+                    score_sum[layer] += score
+                    score_cnt[layer] += 1
 
             if found:
                 hits[layer] += 1
 
-    return total, hits, log_sum, log_cnt
+    return total, hits, score_sum, score_cnt
 
 
 def _load_per_question(path: Path, top_field: str, hint_set: set[str]) -> Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
@@ -91,36 +92,32 @@ def _align_pairs(helpful: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray, np
     def stack_component(idx: int) -> np.ndarray:
         return np.stack([helpful[i][idx] for i in ids], axis=0)
 
-    h_total, h_hits, h_logsum, h_logcnt = (stack_component(j) for j in range(4))
+    h_total, h_hits, h_scoresum, h_scorecnt = (stack_component(j) for j in range(4))
 
     def stack_component_harm(idx: int) -> np.ndarray:
         return np.stack([harmful[i][idx] for i in ids], axis=0)
 
-    hf_total, hf_hits, hf_logsum, hf_logcnt = (stack_component_harm(j) for j in range(4))
-    return ids, (h_total, h_hits, h_logsum, h_logcnt), (hf_total, hf_hits, hf_logsum, hf_logcnt)
+    hf_total, hf_hits, hf_scoresum, hf_scorecnt = (stack_component_harm(j) for j in range(4))
+    return ids, (h_total, h_hits, h_scoresum, h_scorecnt), (hf_total, hf_hits, hf_scoresum, hf_scorecnt)
 
 
-def _aggregate_metrics(total: np.ndarray, hits: np.ndarray, log_sum: np.ndarray, log_cnt: np.ndarray):
+def _aggregate_metrics(total: np.ndarray, hits: np.ndarray, score_sum: np.ndarray, score_cnt: np.ndarray):
     total_s = total.sum(axis=0)
     hits_s = hits.sum(axis=0)
-    log_sum_s = log_sum.sum(axis=0)
-    log_cnt_s = log_cnt.sum(axis=0)
+    score_sum_s = score_sum.sum(axis=0)
+    score_cnt_s = score_cnt.sum(axis=0)
 
-    occur = np.divide(hits_s, total_s, out=np.zeros_like(log_sum_s, dtype=np.float64), where=total_s > 0)
-    mean = np.divide(log_sum_s, log_cnt_s, out=np.full_like(log_sum_s, np.nan, dtype=np.float64), where=log_cnt_s > 0)
+    occur = np.divide(hits_s, total_s, out=np.zeros_like(score_sum_s, dtype=np.float64), where=total_s > 0)
+    mrr = np.divide(score_sum_s, total_s, out=np.full_like(score_sum_s, np.nan, dtype=np.float64), where=total_s > 0)
 
-    activation = np.full_like(log_sum_s, np.nan, dtype=np.float64)
-    mask = (total_s > 0) & (log_cnt_s > 0) & (hits_s > 0)
-    activation[mask] = (log_sum_s[mask] * hits_s[mask]) / (log_cnt_s[mask] * total_s[mask])
-
-    return occur, mean, activation
+    return occur, mrr
 
 
 def _bootstrap_metrics(
     total: np.ndarray,
     hits: np.ndarray,
-    log_sum: np.ndarray,
-    log_cnt: np.ndarray,
+    score_sum: np.ndarray,
+    score_cnt: np.ndarray,
     rng: np.random.Generator,
 ):
     n_questions = total.shape[0]
@@ -130,29 +127,23 @@ def _bootstrap_metrics(
         # indices shape (m, n_questions)
         total_s = np.add.reduce(total[indices], axis=1)
         hits_s = np.add.reduce(hits[indices], axis=1)
-        log_sum_s = np.add.reduce(log_sum[indices], axis=1)
-        log_cnt_s = np.add.reduce(log_cnt[indices], axis=1)
+        score_sum_s = np.add.reduce(score_sum[indices], axis=1)
+        score_cnt_s = np.add.reduce(score_cnt[indices], axis=1)
 
-        occur = np.divide(hits_s, total_s, out=np.zeros_like(log_sum_s, dtype=np.float64), where=total_s > 0)
-        mean = np.divide(log_sum_s, log_cnt_s, out=np.full_like(log_sum_s, np.nan, dtype=np.float64), where=log_cnt_s > 0)
-
-        activation = np.full_like(log_sum_s, np.nan, dtype=np.float64)
-        mask = (total_s > 0) & (log_cnt_s > 0) & (hits_s > 0)
-        activation[mask] = (log_sum_s[mask] * hits_s[mask]) / (log_cnt_s[mask] * total_s[mask])
-        return occur, mean, activation
+        occur = np.divide(hits_s, total_s, out=np.zeros_like(score_sum_s, dtype=np.float64), where=total_s > 0)
+        mrr = np.divide(score_sum_s, total_s, out=np.full_like(score_sum_s, np.nan, dtype=np.float64), where=total_s > 0)
+        return occur, mrr
 
     occur_boot = np.empty((BOOTSTRAP_ITER, LAYERS), dtype=np.float64)
-    mean_boot = np.empty_like(occur_boot)
-    act_boot = np.empty_like(occur_boot)
+    mrr_boot = np.empty_like(occur_boot)
 
     for start in range(0, BOOTSTRAP_ITER, CHUNK):
         end = min(start + CHUNK, BOOTSTRAP_ITER)
-        occur_c, mean_c, act_c = agg_from_indices(idx[start:end])
+        occur_c, mrr_c = agg_from_indices(idx[start:end])
         occur_boot[start:end] = occur_c
-        mean_boot[start:end] = mean_c
-        act_boot[start:end] = act_c
+        mrr_boot[start:end] = mrr_c
 
-    return occur_boot, mean_boot, act_boot
+    return occur_boot, mrr_boot
 
 
 def _percentile_ci(samples: np.ndarray):
@@ -181,26 +172,18 @@ def run_analysis(useful_path: Path, harmful_path: Path, top_field: str, out_path
     harmful = _load_per_question(harmful_path, top_field=top_field, hint_set=hint_set)
 
     ids, h_arrays, hf_arrays = _align_pairs(helpful, harmful)
-    (h_total, h_hits, h_logsum, h_logcnt) = h_arrays
-    (hf_total, hf_hits, hf_logsum, hf_logcnt) = hf_arrays
+    (h_total, h_hits, h_scoresum, h_scorecnt) = h_arrays
+    (hf_total, hf_hits, hf_scoresum, hf_scorecnt) = hf_arrays
 
     rng = np.random.default_rng(BOOTSTRAP_SEED)
 
     # Baseline (full data)
-    h_occ, h_mean, h_act = _aggregate_metrics(h_total, h_hits, h_logsum, h_logcnt)
-    hf_occ, hf_mean, hf_act = _aggregate_metrics(hf_total, hf_hits, hf_logsum, hf_logcnt)
-
-    diff_occ = h_occ - hf_occ
-    diff_mean = h_mean - hf_mean
-    diff_act = h_act - hf_act
+    h_occ, h_mrr = _aggregate_metrics(h_total, h_hits, h_scoresum, h_scorecnt)
+    hf_occ, hf_mrr = _aggregate_metrics(hf_total, hf_hits, hf_scoresum, hf_scorecnt)
 
     # Bootstrap samples
-    h_occ_b, h_mean_b, h_act_b = _bootstrap_metrics(h_total, h_hits, h_logsum, h_logcnt, rng)
-    hf_occ_b, hf_mean_b, hf_act_b = _bootstrap_metrics(hf_total, hf_hits, hf_logsum, hf_logcnt, rng)
-
-    diff_occ_b = h_occ_b - hf_occ_b
-    diff_mean_b = h_mean_b - hf_mean_b
-    diff_act_b = h_act_b - hf_act_b
+    h_occ_b, h_mrr_b = _bootstrap_metrics(h_total, h_hits, h_scoresum, h_scorecnt, rng)
+    hf_occ_b, hf_mrr_b = _bootstrap_metrics(hf_total, hf_hits, hf_scoresum, hf_scorecnt, rng)
 
     result = {
         "ids": ids,
@@ -208,35 +191,21 @@ def run_analysis(useful_path: Path, harmful_path: Path, top_field: str, out_path
         "baseline": {
             "helpful": {
                 "occurrence": h_occ.tolist(),
-                "mean_logit": h_mean.tolist(),
-                "has": h_act.tolist(),
+                "mrr": h_mrr.tolist(),
             },
             "harmful": {
                 "occurrence": hf_occ.tolist(),
-                "mean_logit": hf_mean.tolist(),
-                "has": hf_act.tolist(),
-            },
-            "difference": {
-                "occurrence": diff_occ.tolist(),
-                "mean_logit": diff_mean.tolist(),
-                "has": diff_act.tolist(),
+                "mrr": hf_mrr.tolist(),
             },
         },
         "ci": {
             "helpful": {
                 "occurrence": _percentile_ci(h_occ_b).tolist(),
-                "mean_logit": _percentile_ci(h_mean_b).tolist(),
-                "has": _percentile_ci(h_act_b).tolist(),
+                "mrr": _percentile_ci(h_mrr_b).tolist(),
             },
             "harmful": {
                 "occurrence": _percentile_ci(hf_occ_b).tolist(),
-                "mean_logit": _percentile_ci(hf_mean_b).tolist(),
-                "has": _percentile_ci(hf_act_b).tolist(),
-            },
-            "difference": {
-                "occurrence": _percentile_ci(diff_occ_b).tolist(),
-                "mean_logit": _percentile_ci(diff_mean_b).tolist(),
-                "has": _percentile_ci(diff_act_b).tolist(),
+                "mrr": _percentile_ci(hf_mrr_b).tolist(),
             },
         },
     }

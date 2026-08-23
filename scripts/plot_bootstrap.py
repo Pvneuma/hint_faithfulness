@@ -21,7 +21,7 @@ import numpy as np
 
 
 LAYERS = 36
-METRICS = ["occurrence", "mean_logit", "has"]
+METRICS = ["occurrence", "mrr"]
 
 
 def _to_array(values: List) -> np.ndarray:
@@ -47,10 +47,10 @@ def _plot_four_curves(ax, x, curves, title, ylabel):
         "resid_harm": "D",
     }
     labels = {
-        "attn_help": "attn helpful",
-        "attn_harm": "attn harmful",
-        "resid_help": "resid helpful",
-        "resid_harm": "resid harmful",
+        "attn_help": "MHA / helpful",
+        "attn_harm": "MHA / harmful",
+        "resid_help": "MLP / helpful",
+        "resid_harm": "MLP / harmful",
     }
 
     for key, (base, ci) in curves.items():
@@ -108,7 +108,7 @@ def plot_combined(attn_result: Dict, resid_result: Dict, out_dir: Path):
             ax,
             x,
             curves,
-            title=f"{metric} (attn/resid, helpful/harmful)",
+            title=f"Mean Reciprocal Rank (MHA/MLP, helpful/harmful)",
             ylabel=metric,
         )
 

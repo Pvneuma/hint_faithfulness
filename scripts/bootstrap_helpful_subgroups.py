@@ -8,7 +8,7 @@ from `output/qwen3_logic_five_extracted_results.jsonl`:
 
 For each subset and for each `top_field` (attn_top, resid_post_top), perform
 10,000 bootstrap samples (seed=42) with question-level resampling, computing
-Occurrence, Conditional Mean Logit, and Hint Activation Score. Results are
+Occurrence and Mean Rank Score. Results are
 saved as JSON with baseline metrics and 95% percentile CI.
 """
 
@@ -37,8 +37,8 @@ def _normalize_token(tok: str) -> str:
 def _accumulate_record(record: dict, top_field: str, hint_set: set[str]):
     total = np.zeros(LAYERS, dtype=np.int64)
     hits = np.zeros(LAYERS, dtype=np.int64)
-    log_sum = np.zeros(LAYERS, dtype=np.float64)
-    log_cnt = np.zeros(LAYERS, dtype=np.int64)
+    score_sum = np.zeros(LAYERS, dtype=np.float64)
+    score_cnt = np.zeros(LAYERS, dtype=np.int64)
 
     for pos in record.get("positions", []):
         for layer_entry in pos.get("layers", []):
@@ -47,15 +47,16 @@ def _accumulate_record(record: dict, top_field: str, hint_set: set[str]):
                 continue
             total[layer] += 1
             found = False
-            for item in layer_entry.get(top_field, []):
+            for rank, item in enumerate(layer_entry.get(top_field, [])):
                 token = _normalize_token(str(item.get("token", "")))
                 if token in hint_set:
                     found = True
-                    log_sum[layer] += float(item.get("logit", 0.0))
-                    log_cnt[layer] += 1
+                    score = 1.0 / (rank + 1)
+                    score_sum[layer] += score
+                    score_cnt[layer] += 1
             if found:
                 hits[layer] += 1
-    return total, hits, log_sum, log_cnt
+    return total, hits, score_sum, score_cnt
 
 
 def _load_subset(path: Path, top_field: str, hint_set: set[str], allowed_ids: set[int]):
@@ -72,45 +73,36 @@ def _load_subset(path: Path, top_field: str, hint_set: set[str], allowed_ids: se
     return data
 
 
-def _aggregate(total, hits, log_sum, log_cnt):
+def _aggregate(total, hits, score_sum, score_cnt):
     total_s = total.sum(axis=0)
     hits_s = hits.sum(axis=0)
-    log_sum_s = log_sum.sum(axis=0)
-    log_cnt_s = log_cnt.sum(axis=0)
+    score_sum_s = score_sum.sum(axis=0)
+    score_cnt_s = score_cnt.sum(axis=0)
 
-    occur = np.divide(hits_s, total_s, out=np.zeros_like(log_sum_s, dtype=np.float64), where=total_s > 0)
-    mean = np.divide(log_sum_s, log_cnt_s, out=np.full_like(log_sum_s, np.nan, dtype=np.float64), where=log_cnt_s > 0)
-    activation = np.full_like(log_sum_s, np.nan, dtype=np.float64)
-    mask = (total_s > 0) & (log_cnt_s > 0) & (hits_s > 0)
-    activation[mask] = (log_sum_s[mask] * hits_s[mask]) / (log_cnt_s[mask] * total_s[mask])
-    return occur, mean, activation
+    occur = np.divide(hits_s, total_s, out=np.zeros_like(score_sum_s, dtype=np.float64), where=total_s > 0)
+    mrr = np.divide(score_sum_s, total_s, out=np.full_like(score_sum_s, np.nan, dtype=np.float64), where=total_s > 0)
+    return occur, mrr
 
 
-def _bootstrap(total, hits, log_sum, log_cnt, rng):
+def _bootstrap(total, hits, score_sum, score_cnt, rng):
     n = total.shape[0]
     idx = rng.integers(0, n, size=(BOOTSTRAP_ITER, n), dtype=np.int32)
 
     occur_boot = np.empty((BOOTSTRAP_ITER, LAYERS), dtype=np.float64)
-    mean_boot = np.empty_like(occur_boot)
-    act_boot = np.empty_like(occur_boot)
+    mrr_boot = np.empty_like(occur_boot)
 
     for start in range(0, BOOTSTRAP_ITER, CHUNK):
         end = min(start + CHUNK, BOOTSTRAP_ITER)
         sel = idx[start:end]
         total_s = np.add.reduce(total[sel], axis=1)
         hits_s = np.add.reduce(hits[sel], axis=1)
-        log_sum_s = np.add.reduce(log_sum[sel], axis=1)
-        log_cnt_s = np.add.reduce(log_cnt[sel], axis=1)
+        score_sum_s = np.add.reduce(score_sum[sel], axis=1)
+        score_cnt_s = np.add.reduce(score_cnt[sel], axis=1)
 
-        occur_boot[start:end] = np.divide(hits_s, total_s, out=np.zeros_like(log_sum_s, dtype=np.float64), where=total_s > 0)
-        mean_boot[start:end] = np.divide(log_sum_s, log_cnt_s, out=np.full_like(log_sum_s, np.nan, dtype=np.float64), where=log_cnt_s > 0)
+        occur_boot[start:end] = np.divide(hits_s, total_s, out=np.zeros_like(score_sum_s, dtype=np.float64), where=total_s > 0)
+        mrr_boot[start:end] = np.divide(score_sum_s, total_s, out=np.full_like(score_sum_s, np.nan, dtype=np.float64), where=total_s > 0)
 
-        act = np.full_like(log_sum_s, np.nan, dtype=np.float64)
-        mask = (total_s > 0) & (log_cnt_s > 0) & (hits_s > 0)
-        act[mask] = (log_sum_s[mask] * hits_s[mask]) / (log_cnt_s[mask] * total_s[mask])
-        act_boot[start:end] = act
-
-    return occur_boot, mean_boot, act_boot
+    return occur_boot, mrr_boot
 
 
 def _percentile_ci(samples: np.ndarray):
@@ -160,23 +152,21 @@ def process_subset(name: str, ids: set[int], useful_path: Path, top_field: str, 
         raise ValueError(f"No data for subset {name} and top_field {top_field}")
 
     ordered_ids = sorted(data.keys())
-    arrays = list(zip(*[data[i] for i in ordered_ids]))  # totals, hits, log_sum, log_cnt
-    total, hits, log_sum, log_cnt = [np.stack(arrays[j], axis=0) for j in range(4)]
+    arrays = list(zip(*[data[i] for i in ordered_ids]))  # totals, hits, score_sum, score_cnt
+    total, hits, score_sum, score_cnt = [np.stack(arrays[j], axis=0) for j in range(4)]
 
     rng = np.random.default_rng(BOOTSTRAP_SEED)
 
-    base_occ, base_mean, base_act = _aggregate(total, hits, log_sum, log_cnt)
-    occ_b, mean_b, act_b = _bootstrap(total, hits, log_sum, log_cnt, rng)
+    base_occ, base_mrr = _aggregate(total, hits, score_sum, score_cnt)
+    occ_b, mrr_b = _bootstrap(total, hits, score_sum, score_cnt, rng)
 
     result_base = {
         "occurrence": base_occ.tolist(),
-        "mean_logit": base_mean.tolist(),
-        "has": base_act.tolist(),
+        "mrr": base_mrr.tolist(),
     }
     result_ci = {
         "occurrence": _percentile_ci(occ_b).tolist(),
-        "mean_logit": _percentile_ci(mean_b).tolist(),
-        "has": _percentile_ci(act_b).tolist(),
+        "mrr": _percentile_ci(mrr_b).tolist(),
     }
 
     outfile = out_dir / f"bootstrap_helpful_{name}_{top_field}.json"

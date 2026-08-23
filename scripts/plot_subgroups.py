@@ -6,7 +6,7 @@ Expects JSON outputs from `bootstrap_helpful_subgroups.py`:
   - bootstrap_helpful_reported_resid_post_top.json
   - bootstrap_helpful_unreported_resid_post_top.json
 
-For each metric (occurrence, mean_logit, has), generates one PNG containing
+For each metric (occurrence, mrr), generates one PNG containing
 four curves: attn/resid × reported/unreported, with 95% CI shading.
 """
 
@@ -21,7 +21,7 @@ import numpy as np
 
 
 LAYERS = 36
-METRICS = ["occurrence", "mean_logit", "has"]
+METRICS = ["occurrence", "mrr"]
 
 
 def _to_array(values: List) -> np.ndarray:
@@ -47,10 +47,10 @@ def _plot(ax, x, curves, title, ylabel):
         "resid_unreported": "D",
     }
     labels = {
-        "attn_reported": "attn reported",
-        "attn_unreported": "attn unreported",
-        "resid_reported": "resid reported",
-        "resid_unreported": "resid unreported",
+        "attn_reported": "MHA / helpful-reported",
+        "attn_unreported": "MHA / helpful-unreported",
+        "resid_reported": "MLP / helpful-reported",
+        "resid_unreported": "MLP / helpful-unreported",
     }
 
     for key, (base, ci) in curves.items():
@@ -113,7 +113,7 @@ def plot_all(attn_rep, attn_unrep, resid_rep, resid_unrep, out_dir: Path):
         }
 
         fig, ax = plt.subplots(1, 1, figsize=(9, 5))
-        _plot(ax, x, curves, title=f"{metric} (attn/resid, reported/unreported)", ylabel=metric)
+        _plot(ax, x, curves, title=f"Mean Reciprocal Rank (MHA/MLP, helpful-reported/helpful-unreported)", ylabel=metric)
 
         fig.tight_layout()
         out_path = out_dir / f"plot_helpful_subgroups_{metric}.png"
