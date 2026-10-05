@@ -8,6 +8,8 @@ Outputs PNG files into a configurable directory (default: output/plots).
 Each metric plot contains four curves:
 - attn_top helpful / harmful
 - resid_post_top helpful / harmful
+
+An additional MRR plot contains only the two MHA curves.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ def _load_result(path: Path) -> Dict:
         return json.load(f)
 
 
-def _plot_four_curves(ax, x, curves, title, ylabel):
+def _plot_four_curves(ax, x, curves, title, ylabel, labels=None):
     colors = {
         "attn_help": "#1f77b4",
         "attn_harm": "#d62728",
@@ -46,12 +48,13 @@ def _plot_four_curves(ax, x, curves, title, ylabel):
         "resid_help": "^",
         "resid_harm": "D",
     }
-    labels = {
-        "attn_help": "MHA / helpful",
-        "attn_harm": "MHA / harmful",
-        "resid_help": "MLP / helpful",
-        "resid_harm": "MLP / harmful",
-    }
+    if labels is None:
+        labels = {
+            "attn_help": "MHA / helpful hint",
+            "attn_harm": "MHA / harmful hint",
+            "resid_help": "MLP / helpful hint",
+            "resid_harm": "MLP / harmful hint",
+        }
 
     for key, (base, ci) in curves.items():
         c = colors[key]
@@ -62,7 +65,7 @@ def _plot_four_curves(ax, x, curves, title, ylabel):
     ax.set_xlabel("Layer")
     ax.set_ylabel(ylabel)
     ax.set_xlim(min(x), max(x))
-    ax.legend()
+    ax.legend(loc="upper left", fontsize=18, markerscale=2.0)
     ax.grid(True, linestyle="--", alpha=0.3)
 
 
@@ -104,12 +107,18 @@ def plot_combined(attn_result: Dict, resid_result: Dict, out_dir: Path):
         }
 
         fig, ax = plt.subplots(1, 1, figsize=(9, 5))
+        title = (
+            "Mean Reciprocal Rank (MHA/MLP, helpful hint/harmful hint)"
+            if metric == "mrr"
+            else "Occurrence (MHA/MLP, helpful hint/harmful hint)"
+        )
+        ylabel = "Mean Reciprocal Rank" if metric == "mrr" else metric
         _plot_four_curves(
             ax,
             x,
             curves,
-            title=f"Mean Reciprocal Rank (MHA/MLP, helpful/harmful)",
-            ylabel=metric,
+            title=title,
+            ylabel=ylabel,
         )
 
         fig.tight_layout()
@@ -118,6 +127,29 @@ def plot_combined(attn_result: Dict, resid_result: Dict, out_dir: Path):
         fig.savefig(out_path, dpi=200)
         plt.close(fig)
         print(f"Saved {out_path}")
+
+        if metric == "mrr":
+            mha_curves = {
+                "attn_help": curves["attn_help"],
+                "attn_harm": curves["attn_harm"],
+            }
+            fig, ax = plt.subplots(1, 1, figsize=(9, 5))
+            _plot_four_curves(
+                ax,
+                x,
+                mha_curves,
+                title="Mean Reciprocal Rank (MHA, helpful hint/harmful hint)",
+                ylabel="Mean Reciprocal Rank",
+                labels={
+                    "attn_help": "helpful hint",
+                    "attn_harm": "harmful hint",
+                },
+            )
+            fig.tight_layout()
+            mha_out_path = out_dir / "plot_mha_mrr.png"
+            fig.savefig(mha_out_path, dpi=200)
+            plt.close(fig)
+            print(f"Saved {mha_out_path}")
 
 
 def main():

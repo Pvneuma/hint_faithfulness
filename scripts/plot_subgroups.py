@@ -47,10 +47,10 @@ def _plot(ax, x, curves, title, ylabel):
         "resid_unreported": "D",
     }
     labels = {
-        "attn_reported": "MHA / helpful-reported",
-        "attn_unreported": "MHA / helpful-unreported",
-        "resid_reported": "MLP / helpful-reported",
-        "resid_unreported": "MLP / helpful-unreported",
+        "attn_reported": "MHA / reported",
+        "attn_unreported": "MHA / unreported",
+        "resid_reported": "MLP / reported",
+        "resid_unreported": "MLP / unreported",
     }
 
     for key, (base, ci) in curves.items():
@@ -71,7 +71,7 @@ def _plot(ax, x, curves, title, ylabel):
     ax.set_xlabel("Layer")
     ax.set_ylabel(ylabel)
     ax.set_xlim(min(x), max(x))
-    ax.legend()
+    ax.legend(loc="upper left", fontsize=18, markerscale=2.0)
     ax.grid(True, linestyle="--", alpha=0.3)
 
 
@@ -113,7 +113,13 @@ def plot_all(attn_rep, attn_unrep, resid_rep, resid_unrep, out_dir: Path):
         }
 
         fig, ax = plt.subplots(1, 1, figsize=(9, 5))
-        _plot(ax, x, curves, title=f"Mean Reciprocal Rank (MHA/MLP, helpful-reported/helpful-unreported)", ylabel=metric)
+        title = (
+            "Mean Reciprocal Rank (MHA/MLP, reported/unreported)"
+            if metric == "mrr"
+            else "Occurrence (MHA/MLP, reported/unreported)"
+        )
+        ylabel = "Mean Reciprocal Rank" if metric == "mrr" else metric
+        _plot(ax, x, curves, title=title, ylabel=ylabel)
 
         fig.tight_layout()
         out_path = out_dir / f"plot_helpful_subgroups_{metric}.png"
